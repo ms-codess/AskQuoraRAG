@@ -2,7 +2,7 @@
 # 🧠 Quora-RAG: Context-Aware Q&A Assistant
 
 **Quora-RAG** is a lightweight **Retrieval-Augmented Generation (RAG)** app that answers questions using real Quora-style Q&A data.  
-It retrieves relevant pairs from the [toughdata/quora-question-answer-dataset](https://huggingface.co/datasets/toughdata/quora-question-answer-dataset) and generates concise, grounded answers using an LLM — just like how Poe blends retrieval and generation.
+It retrieves relevant pairs from the [toughdata/quora-question-answer-dataset](https://huggingface.co/datasets/toughdata/quora-question-answer-dataset) and generates concise, grounded answers using an LLM.
 
 ---
 
@@ -107,7 +107,7 @@ docker run -e OPENAI_API_KEY=sk-xxx -p 8501:8501 quora-rag
 
 ---
 
-## 🧪 Example Query
+##  Example Query
 
 **User:** “How can I start learning AI as a beginner?”
 **Retrieved Context:** 3 Quora-style answers from dataset
@@ -118,5 +118,3 @@ docker run -e OPENAI_API_KEY=sk-xxx -p 8501:8501 quora-rag
 
 
 
-
-## Demo 
