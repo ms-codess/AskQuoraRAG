@@ -4,15 +4,15 @@ from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
-from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 
 
-def load_retriever(chroma_dir: str, k: int = 4, search_type: str = "similarity"):
+def load_retriever(index_dir: str, k: int = 4, search_type: str = "similarity"):
     load_dotenv()
     embeddings = OpenAIEmbeddings(model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"))
-    db = Chroma(persist_directory=str(Path(chroma_dir)), embedding_function=embeddings)
+    db = FAISS.load_local(str(Path(index_dir)), embeddings, allow_dangerous_deserialization=True)
     if search_type == "mmr":
         return db.as_retriever(search_type="mmr", search_kwargs={"k": k})
     return db.as_retriever(search_type="similarity", search_kwargs={"k": k})
@@ -57,4 +57,3 @@ def answer_question(
         })
 
     return {"answer": resp.content, "sources": sources}
-
