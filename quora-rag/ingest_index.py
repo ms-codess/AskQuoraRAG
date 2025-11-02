@@ -1,18 +1,16 @@
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import Dict, Iterable, List
 
+import numpy as np
+import faiss  # type: ignore
 from dotenv import load_dotenv
-
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.documents import Document
-
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
+from openai import OpenAI
 
 
-def read_csv(path: Path):
+def read_csv(path: Path) -> Iterable[Dict]:
     import csv
 
     with path.open("r", encoding="utf-8", newline="") as f:
@@ -21,7 +19,7 @@ def read_csv(path: Path):
             yield row
 
 
-def read_jsonl(path: Path):
+def read_jsonl(path: Path) -> Iterable[Dict]:
     import json
 
     with path.open("r", encoding="utf-8") as f:
@@ -32,8 +30,8 @@ def read_jsonl(path: Path):
             yield json.loads(line)
 
 
-def build_docs(records) -> List[Document]:
-    docs: List[Document] = []
+def build_docs(records: Iterable[Dict]) -> List[Dict]:
+    docs: List[Dict] = []
     for r in records:
         q = (r.get("question") or r.get("Question") or r.get("q") or "").strip()
         a = (r.get("answer") or r.get("Answer") or r.get("a") or "").strip()
@@ -44,21 +42,43 @@ def build_docs(records) -> List[Document]:
 
         content = f"Question: {q}\nAnswer: {a}".strip()
         meta = {"question": q or None, "id": _id}
-        docs.append(Document(page_content=content, metadata=meta))
+        docs.append({"content": content, "metadata": meta})
     return docs
 
 
-def chunk_docs(docs: List[Document]) -> List[Document]:
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1200,
-        chunk_overlap=150,
-        separators=["\n\n", "\n", ". ", ".", "! ", "? ", "?", ", ", ",", " ", ""],
-    )
-    return splitter.split_documents(docs)
+def chunk_text(text: str, chunk_size: int = 1200, chunk_overlap: int = 150) -> List[str]:
+    chunks: List[str] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + chunk_size, n)
+        chunks.append(text[start:end])
+        if end == n:
+            break
+        start = max(end - chunk_overlap, 0)
+    return chunks
+
+
+def chunk_docs(docs: List[Dict]) -> List[Dict]:
+    out: List[Dict] = []
+    for d in docs:
+        parts = chunk_text(d["content"])
+        for p in parts:
+            out.append({"content": p, "metadata": d.get("metadata", {})})
+    return out
 
 
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
+
+
+def _embed_texts(texts: List[str], model: str) -> np.ndarray:
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    res = client.embeddings.create(model=model, input=texts)
+    vecs = [np.array(d.embedding, dtype=np.float32) for d in res.data]
+    arr = np.vstack(vecs)
+    faiss.normalize_L2(arr)
+    return arr
 
 
 def ingest(input_path: Path, index_dir: Path, embedding_model: str) -> None:
@@ -78,23 +98,27 @@ def ingest(input_path: Path, index_dir: Path, embedding_model: str) -> None:
     docs = chunk_docs(base_docs)
     print(f"Built {len(base_docs)} base docs -> {len(docs)} chunks")
 
-    embeddings = OpenAIEmbeddings(model=embedding_model)
-
     ensure_dir(index_dir)
 
-    index_path = index_dir
-    # Load existing or create new
-    if (index_path / "index.faiss").exists() and (index_path / "index.pkl").exists():
-        db = FAISS.load_local(
-            str(index_path), embeddings, allow_dangerous_deserialization=True
-        )
-        db.add_documents(docs)
-        db.save_local(str(index_path))
-        print(f"Added {len(docs)} chunks to existing FAISS index at {index_path}")
+    metas_path = index_dir / "meta.json"
+    index_path = index_dir / "index.faiss"
+
+    texts = [d["content"] for d in docs]
+    embs = _embed_texts(texts, embedding_model)
+
+    if index_path.exists() and metas_path.exists():
+        index = faiss.read_index(str(index_path))
+        index.add(embs)
+        meta = json.loads(metas_path.read_text(encoding="utf-8"))
+        meta["chunks"].extend(docs)
     else:
-        db = FAISS.from_documents(documents=docs, embedding=embeddings)
-        db.save_local(str(index_path))
-        print(f"Created new FAISS index at {index_path} with {len(docs)} chunks")
+        index = faiss.IndexFlatIP(embs.shape[1])
+        index.add(embs)
+        meta = {"embedding_model": embedding_model, "chunks": docs}
+
+    faiss.write_index(index, str(index_path))
+    metas_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    print(f"Saved FAISS index at {index_dir} with {len(meta['chunks'])} total chunks")
 
 
 def parse_args() -> argparse.Namespace:
