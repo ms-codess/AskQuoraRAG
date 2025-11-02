@@ -28,7 +28,6 @@ chroma/
 
 # Streamlit local state
 .streamlit/*secrets*
-!.streamlit/secrets.toml
 .streamlit/*local*.*
 
 # IDE
