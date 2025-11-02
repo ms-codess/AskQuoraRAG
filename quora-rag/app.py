@@ -14,7 +14,13 @@ def main() -> None:
     st.title("Quora-QA RAG")
     st.caption("Ask questions and retrieve answers grounded in your ingested Quora-style data.")
 
-    index_dir = Path(os.getenv("FAISS_INDEX_DIR", "./data/faiss")).resolve()
+    app_dir = Path(__file__).parent.resolve()
+    index_env = os.getenv("FAISS_INDEX_DIR")
+    if index_env:
+        idx_path = Path(index_env)
+        index_dir = (app_dir / idx_path).resolve() if not idx_path.is_absolute() else idx_path.resolve()
+    else:
+        index_dir = (app_dir / "data/faiss").resolve()
     model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
