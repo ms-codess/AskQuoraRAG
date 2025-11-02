@@ -5,3 +5,7 @@ sentence-transformers==2.7.0
 openai==1.48.0
 tiktoken==0.7.0
 python-dotenv==1.0.1
+langchain-core==1.0.2
+langchain-community==0.4.1
+langchain-text-splitters==1.0.0
+langchain-openai==1.0.1
