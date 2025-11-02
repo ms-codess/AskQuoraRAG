@@ -8,6 +8,8 @@ import numpy as np
 import faiss  # type: ignore
 from dotenv import load_dotenv
 import requests
+import time
+import hashlib
 
 
 def read_csv(path: Path) -> Iterable[Dict]:
@@ -83,12 +85,22 @@ def _openai_request(endpoint: str, payload: Dict[str, object]) -> Dict[str, obje
     base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    # basic retry with exponential backoff for 429/5xx
+    delay = 1.0
+    for attempt in range(7):
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        if resp.status_code < 400:
+            return resp.json()  # type: ignore[return-value]
+        if resp.status_code in (429, 500, 502, 503, 504):
+            time.sleep(delay)
+            delay = min(delay * 2, 30)
+            continue
+        resp.raise_for_status()
     resp.raise_for_status()
-    return resp.json()  # type: ignore[return-value]
+    return resp.json()  # unreachable
 
 
-def _embed_texts(texts: List[str], model: str) -> np.ndarray:
+def _embed_texts_openai(texts: List[str], model: str) -> np.ndarray:
     res = _openai_request("embeddings", {"model": model, "input": texts})
     data = res["data"]  # type: ignore[index]
     vecs = [np.array(item["embedding"], dtype=np.float32) for item in data]  # type: ignore[index]
@@ -97,7 +109,26 @@ def _embed_texts(texts: List[str], model: str) -> np.ndarray:
     return arr
 
 
-def ingest_records(records: Iterable[Dict], index_dir: Path, embedding_model: str, batch_size: int = 128) -> None:
+def _embed_texts_hash(texts: List[str], dim: int = 1024) -> np.ndarray:
+    mat = np.zeros((len(texts), dim), dtype=np.float32)
+    for i, txt in enumerate(texts):
+        for tok in txt.lower().split():
+            h = int.from_bytes(hashlib.sha1(tok.encode("utf-8")).digest()[:8], "little")
+            j = h % dim
+            mat[i, j] += 1.0
+    faiss.normalize_L2(mat)
+    return mat
+
+
+def ingest_records(
+    records: Iterable[Dict],
+    index_dir: Path,
+    embedding_model: str,
+    batch_size: int = 64,
+    max_records: Optional[int] = None,
+    embed_provider: str = "openai",
+    hash_dim: int = 1024,
+) -> None:
     ensure_dir(index_dir)
     metas_path = index_dir / "meta.json"
     index_path = index_dir / "index.faiss"
@@ -107,7 +138,7 @@ def ingest_records(records: Iterable[Dict], index_dir: Path, embedding_model: st
     if index is None:
         # initialize lazily when we know embedding dim
         pass
-    meta = json.loads(metas_path.read_text(encoding="utf-8")) if metas_path.exists() else {"embedding_model": embedding_model, "chunks": []}
+    meta = json.loads(metas_path.read_text(encoding="utf-8")) if metas_path.exists() else {"embedding_model": embedding_model, "embedding_provider": embed_provider, "embedding_dim": None, "chunks": []}
 
     buffer: List[Dict] = []
     total_new = 0
@@ -118,18 +149,32 @@ def ingest_records(records: Iterable[Dict], index_dir: Path, embedding_model: st
             return
         chunks = chunk_docs(buf)
         texts = [d["content"] for d in chunks]
-        embs = _embed_texts(texts, embedding_model)
+        if embed_provider == "hash":
+            embs = _embed_texts_hash(texts, dim=hash_dim)
+            if meta.get("embedding_dim") is None:
+                meta["embedding_dim"] = hash_dim
+        else:
+            embs = _embed_texts_openai(texts, embedding_model)
+            if meta.get("embedding_dim") is None:
+                meta["embedding_dim"] = int(embs.shape[1])
         if index is None:
             index = faiss.IndexFlatIP(embs.shape[1])
         index.add(embs)
         meta["chunks"].extend(chunks)
         total_new += len(chunks)
 
+    processed = 0
     for r in records:
         d = normalize_record(r)
         if not d:
             continue
         buffer.append(d)
+        processed += 1
+        if max_records is not None and processed >= max_records:
+            # flush and break
+            flush(buffer)
+            buffer.clear()
+            break
         if len(buffer) >= batch_size:
             flush(buffer)
             buffer.clear()
@@ -153,7 +198,17 @@ def read_hf(hf_dataset: str, split: str) -> Iterator[Dict]:
         yield dict(r)
 
 
-def ingest(input_path: Optional[Path], index_dir: Path, embedding_model: str, hf_dataset: Optional[str] = None, split: str = "train") -> None:
+def ingest(
+    input_path: Optional[Path],
+    index_dir: Path,
+    embedding_model: str,
+    hf_dataset: Optional[str] = None,
+    split: str = "train",
+    batch_size: int = 64,
+    max_records: Optional[int] = None,
+    embed_provider: str = "openai",
+    hash_dim: int = 1024,
+) -> None:
     if input_path:
         ext = input_path.suffix.lower()
         if ext == ".csv":
@@ -162,10 +217,10 @@ def ingest(input_path: Optional[Path], index_dir: Path, embedding_model: str, hf
             records = read_jsonl(input_path)
         else:
             raise ValueError("Unsupported file type. Use .csv or .jsonl")
-        ingest_records(records, index_dir, embedding_model)
+        ingest_records(records, index_dir, embedding_model, batch_size=batch_size, max_records=max_records, embed_provider=embed_provider, hash_dim=hash_dim)
     elif hf_dataset:
         records = read_hf(hf_dataset, split)
-        ingest_records(records, index_dir, embedding_model)
+        ingest_records(records, index_dir, embedding_model, batch_size=batch_size, max_records=max_records, embed_provider=embed_provider, hash_dim=hash_dim)
     else:
         raise ValueError("Provide a file path or --hf-dataset")
 
@@ -186,6 +241,10 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
         help="OpenAI embedding model",
     )
+    parser.add_argument("--batch-size", type=int, default=64, help="Embedding batch size (default: 64)")
+    parser.add_argument("--max-records", type=int, default=None, help="Limit number of input records for ingestion")
+    parser.add_argument("--embed-provider", choices=["openai", "hash"], default=os.getenv("EMBED_PROVIDER", "openai"), help="Embedding provider: openai or hash (local)")
+    parser.add_argument("--hash-dim", type=int, default=int(os.getenv("HASH_DIM", 1024)), help="Hash embedding dimension when using --embed-provider hash")
     return parser.parse_args()
 
 
@@ -193,7 +252,17 @@ def main() -> None:
     load_dotenv()
     args = parse_args()
     input_path = args.input.resolve() if args.input else None
-    ingest(input_path, args.index_dir.resolve(), args.embedding_model, hf_dataset=args.hf_dataset, split=args.split)
+    ingest(
+        input_path,
+        args.index_dir.resolve(),
+        args.embedding_model,
+        hf_dataset=args.hf_dataset,
+        split=args.split,
+        batch_size=args.batch_size,
+        max_records=args.max_records,
+        embed_provider=args.embed_provider,
+        hash_dim=args.hash_dim,
+    )
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
 import os
 import json
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from dotenv import load_dotenv
@@ -21,18 +22,38 @@ def _openai_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    delay = 1.0
+    for _ in range(7):
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        if resp.status_code < 400:
+            return resp.json()
+        if resp.status_code in (429, 500, 502, 503, 504):
+            import time
+            time.sleep(delay)
+            delay = min(delay * 2, 30)
+            continue
+        resp.raise_for_status()
     resp.raise_for_status()
     return resp.json()
 
 
-def _embed_texts(texts: List[str], model: str) -> np.ndarray:
+def _embed_texts_openai(texts: List[str], model: str) -> np.ndarray:
     res = _openai_request("embeddings", {"model": model, "input": texts})
     vectors = [np.array(item["embedding"], dtype=np.float32) for item in res["data"]]
     arr = np.vstack(vectors)
-    # Normalize for cosine similarity
     faiss.normalize_L2(arr)
     return arr
+
+
+def _embed_texts_hash(texts: List[str], dim: int) -> np.ndarray:
+    mat = np.zeros((len(texts), dim), dtype=np.float32)
+    for i, txt in enumerate(texts):
+        for tok in txt.lower().split():
+            h = int.from_bytes(hashlib.sha1(tok.encode("utf-8")).digest()[:8], "little")
+            j = h % dim
+            mat[i, j] += 1.0
+    faiss.normalize_L2(mat)
+    return mat
 
 
 @dataclass
@@ -60,7 +81,11 @@ def load_retriever(index_dir: str, k: int = 4, search_type: str = "similarity") 
     meta = json.loads((index_path / "meta.json").read_text(encoding="utf-8"))
     chunks = meta["chunks"]
     embedding_model = meta.get("embedding_model", os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"))
-    return SimpleFaissRetriever(index=index, chunks=chunks, embedding_model=embedding_model, default_k=k)
+    # also record provider/dim on retriever instance by piggybacking metadata dict
+    retr = SimpleFaissRetriever(index=index, chunks=chunks, embedding_model=embedding_model, default_k=k)
+    retr._provider = meta.get("embedding_provider", "openai")  # type: ignore[attr-defined]
+    retr._dim = meta.get("embedding_dim", None)  # type: ignore[attr-defined]
+    return retr
 
 
 def _format_docs(docs: List[Dict[str, Any]]) -> str:
@@ -76,7 +101,15 @@ def answer_question(
     load_dotenv()
     model = model_name or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-    docs = retriever.get_relevant_documents(question)
+    # embed query consistently with index provider
+    provider = getattr(retriever, "_provider", "openai")
+    dim = getattr(retriever, "_dim", None)
+    if provider == "hash":
+        qv = _embed_texts_hash([question], int(dim or 1024))
+        D, I = retriever.index.search(qv, retriever.default_k)
+        docs = [retriever.chunks[i] for i in I[0] if i != -1]
+    else:
+        docs = retriever.get_relevant_documents(question)
     context = _format_docs(docs)
 
     messages = [
