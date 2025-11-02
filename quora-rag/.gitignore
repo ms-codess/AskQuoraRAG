@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Data / Vector store
+data/
+chroma/
+*.sqlite
+
+# Streamlit local state
+.streamlit/*secrets*
+.streamlit/*local*.*
+
+# IDE
+.vscode/
+.idea/
