@@ -24,22 +24,21 @@ def _get_retriever(index_dir: str, k: int):
     return load_retriever(index_dir=index_dir, k=k, search_type="similarity")
 
 
-def main() -> None:
-    load_dotenv()
-
-    st.set_page_config(page_title="Quora-QA RAG", page_icon="❓", layout="wide")
-
-    st.markdown("## Quora-QA RAG")
-    st.caption("Ask a question. Get an answer grounded in your ingested Q/A data.")
-
+def _resolve_index_dir() -> Path:
     app_dir = Path(__file__).parent.resolve()
     index_env = os.getenv("FAISS_INDEX_DIR")
     if index_env:
         idx_path = Path(index_env)
-        index_dir = (app_dir / idx_path).resolve() if not idx_path.is_absolute() else idx_path.resolve()
-    else:
-        index_dir = (app_dir / "data/faiss").resolve()
+        return (app_dir / idx_path).resolve() if not idx_path.is_absolute() else idx_path.resolve()
+    return (app_dir / "data/faiss").resolve()
 
+
+def main() -> None:
+    load_dotenv()
+    st.set_page_config(page_title="Quora-QA RAG", page_icon="🤖", layout="wide")
+
+    # Sidebar: status + settings
+    index_dir = _resolve_index_dir()
     with st.sidebar:
         st.subheader("Index Status")
         st.write(f"Path: `{index_dir}`")
@@ -52,71 +51,78 @@ def main() -> None:
         else:
             st.warning("No index found. Run ingestion first.")
 
-        with st.expander("Settings", expanded=False):
-            k = st.slider("Results to use (Top‑K)", min_value=1, max_value=10, value=4)
+        st.markdown("---")
+        k = st.slider("Top‑K context", min_value=1, max_value=10, value=4)
+        st.session_state["top_k"] = k
+        st.caption("Higher K may improve grounding but can add noise.")
 
         st.markdown("---")
-        st.markdown("Need an index?\n\n`python ingest_index.py <file.csv>`\n\nOr HF: `--hf-dataset toughdata/quora-question-answer-dataset`.")
+        st.markdown("Ingest: `python ingest_index.py <file.csv>` or `--hf-dataset toughdata/quora-question-answer-dataset`.")
 
-    col_q, col_btn = st.columns([4, 1])
-    with col_q:
-        query = st.text_input(
-            "Ask a question",
-            placeholder="e.g., How can I improve my public speaking?",
-        )
-    with col_btn:
-        ask = st.button("Ask", type="primary")
+    # Header
+    st.markdown("### Chat with your Quora‑style knowledge base")
 
-    st.markdown("Try:")
-    sugg_cols = st.columns(3)
-    examples = [
-        "How to overcome interview anxiety?",
-        "Tips to learn Python faster?",
-        "Best ways to stay motivated?",
-    ]
-    for i, ex in enumerate(examples):
-        if sugg_cols[i].button(ex, key=f"ex_{i}"):
-            query = ex
-            st.session_state["_prefill_query"] = ex
-
+    # Guard on index
     if not index_dir.exists():
         st.stop()
 
+    # Load retriever (cached per K)
     try:
-        retriever = _get_retriever(str(index_dir), st.session_state.get("k", 4) if "k" in st.session_state else 4)
+        retriever = _get_retriever(str(index_dir), st.session_state.get("top_k", 4))
     except Exception:
         st.info("Retriever not available yet. Ingest data to proceed.")
         st.stop()
 
-    if (ask or st.session_state.pop("_prefill_query", None)) and query.strip():
-        with st.spinner("Thinking..."):
-            try:
-                result = answer_question(
-                    question=query.strip(),
-                    retriever=retriever,
-                    model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                    temperature=0.2,
-                )
-            except Exception as e:
-                st.error(f"Error: {e}")
-                return
+    # Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {"role": "assistant", "content": "Hi! Ask me anything. I’ll answer based on your indexed Q/A data."}
+        ]
 
-        st.markdown("### Answer")
-        st.success(result.get("answer", ""))
+    # Render history
+    for m in st.session_state.messages:
+        with st.chat_message(m["role"], avatar="🧑" if m["role"] == "user" else "🤖"):
+            st.markdown(m["content"])
+            if m.get("sources"):
+                with st.expander("Sources"):
+                    for i, src in enumerate(m["sources"], start=1):
+                        st.markdown(f"**Source {i}**")
+                        st.write(src.get("content", ""))
 
-        sources = result.get("sources", [])
-        if sources:
-            st.markdown("### Sources")
-            for i, src in enumerate(sources, start=1):
-                with st.expander(f"Source {i}"):
-                    st.write(src.get("content", ""))
-                    meta = {k: v for k, v in (src.get("metadata") or {}).items() if v is not None}
-                    if meta:
-                        st.caption(
-                            ", ".join([f"{k}: {v}" for k, v in meta.items()])
-                        )
+    # Chat input
+    prompt = st.chat_input("Type your question…")
+    if prompt:
+        # Add user message
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user", avatar="🧑"):
+            st.markdown(prompt)
+
+        # Generate answer
+        with st.chat_message("assistant", avatar="🤖"):
+            with st.spinner("Thinking…"):
+                try:
+                    result = answer_question(
+                        question=prompt.strip(),
+                        retriever=retriever,
+                        model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                        temperature=0.2,
+                    )
+                except Exception as e:
+                    st.error(f"Error: {e}")
+                    return
+
+            answer_text = result.get("answer", "")
+            sources = result.get("sources", [])
+            st.markdown(answer_text)
+            if sources:
+                with st.expander("Sources"):
+                    for i, src in enumerate(sources, start=1):
+                        st.markdown(f"**Source {i}**")
+                        st.write(src.get("content", ""))
+
+        # Save assistant message with sources
+        st.session_state.messages.append({"role": "assistant", "content": answer_text, "sources": sources})
 
 
 if __name__ == "__main__":
     main()
-
