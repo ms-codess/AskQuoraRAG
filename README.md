@@ -8,7 +8,7 @@ It retrieves relevant pairs from the [toughdata/quora-question-answer-dataset](h
 
 ##  Features
 -  **Semantic Search** — Uses FAISS vector indexing for fast, meaningful retrieval.
-- 💬 **RAG Pipeline** — Combines retrieval + generation for factual answers.
+-  **RAG Pipeline** — Combines retrieval + generation for factual answers.
 - **Streamlit UI** — Clean interactive web interface.
 -  **Optional LLM Layer** — Uses OpenAI (GPT-4o-mini) for concise context-aware output.
 -  **Dockerized** — Run anywhere with one command.
