@@ -7,18 +7,28 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from dotenv import load_dotenv
 import faiss  # type: ignore
-from openai import OpenAI
+import requests
 
 
-def _get_openai() -> OpenAI:
+def _openai_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     load_dotenv()
-    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY not set in environment")
+    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def _embed_texts(texts: List[str], model: str) -> np.ndarray:
-    client = _get_openai()
-    res = client.embeddings.create(model=model, input=texts)
-    vectors = [np.array(d.embedding, dtype=np.float32) for d in res.data]
+    res = _openai_request("embeddings", {"model": model, "input": texts})
+    vectors = [np.array(item["embedding"], dtype=np.float32) for item in res["data"]]
     arr = np.vstack(vectors)
     # Normalize for cosine similarity
     faiss.normalize_L2(arr)
@@ -64,7 +74,6 @@ def answer_question(
     temperature: float = 0.2,
 ) -> Dict[str, Any]:
     load_dotenv()
-    client = _get_openai()
     model = model_name or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     docs = retriever.get_relevant_documents(question)
@@ -78,8 +87,11 @@ def answer_question(
         {"role": "user", "content": f"Question: {question}\n\nContext:\n{context}"},
     ]
 
-    resp = client.chat.completions.create(model=model, messages=messages, temperature=temperature)
-    answer_text = resp.choices[0].message.content or ""
+    res = _openai_request(
+        "chat/completions",
+        {"model": model, "messages": messages, "temperature": float(temperature)},
+    )
+    answer_text = res["choices"][0]["message"]["content"] or ""
 
     sources: List[Dict[str, Any]] = []
     for d in docs:

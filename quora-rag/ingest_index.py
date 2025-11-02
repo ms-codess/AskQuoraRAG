@@ -7,7 +7,7 @@ from typing import Dict, Iterable, List
 import numpy as np
 import faiss  # type: ignore
 from dotenv import load_dotenv
-from openai import OpenAI
+import requests
 
 
 def read_csv(path: Path) -> Iterable[Dict]:
@@ -72,10 +72,22 @@ def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 
+def _openai_request(endpoint: str, payload: Dict[str, object]) -> Dict[str, object]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY not set in environment")
+    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    resp.raise_for_status()
+    return resp.json()  # type: ignore[return-value]
+
+
 def _embed_texts(texts: List[str], model: str) -> np.ndarray:
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    res = client.embeddings.create(model=model, input=texts)
-    vecs = [np.array(d.embedding, dtype=np.float32) for d in res.data]
+    res = _openai_request("embeddings", {"model": model, "input": texts})
+    data = res["data"]  # type: ignore[index]
+    vecs = [np.array(item["embedding"], dtype=np.float32) for item in data]  # type: ignore[index]
     arr = np.vstack(vecs)
     faiss.normalize_L2(arr)
     return arr
