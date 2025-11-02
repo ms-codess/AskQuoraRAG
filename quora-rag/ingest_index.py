@@ -2,7 +2,7 @@ import argparse
 import json
 import os
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, Iterator, List, Optional
 
 import numpy as np
 import faiss  # type: ignore
@@ -30,19 +30,23 @@ def read_jsonl(path: Path) -> Iterable[Dict]:
             yield json.loads(line)
 
 
+def normalize_record(r: Dict) -> Optional[Dict]:
+    q = (r.get("question") or r.get("Question") or r.get("q") or r.get("questions") or "").strip()
+    a = (r.get("answer") or r.get("Answer") or r.get("a") or r.get("answers") or "").strip()
+    _id = (r.get("id") or r.get("_id") or r.get("uuid") or None)
+    if not q and not a:
+        return None
+    content = f"Question: {q}\nAnswer: {a}".strip()
+    meta = {"question": q or None, "id": _id}
+    return {"content": content, "metadata": meta}
+
+
 def build_docs(records: Iterable[Dict]) -> List[Dict]:
     docs: List[Dict] = []
     for r in records:
-        q = (r.get("question") or r.get("Question") or r.get("q") or "").strip()
-        a = (r.get("answer") or r.get("Answer") or r.get("a") or "").strip()
-        _id = (r.get("id") or r.get("_id") or r.get("uuid") or None)
-
-        if not q and not a:
-            continue
-
-        content = f"Question: {q}\nAnswer: {a}".strip()
-        meta = {"question": q or None, "id": _id}
-        docs.append({"content": content, "metadata": meta})
+        d = normalize_record(r)
+        if d:
+            docs.append(d)
     return docs
 
 
@@ -93,49 +97,84 @@ def _embed_texts(texts: List[str], model: str) -> np.ndarray:
     return arr
 
 
-def ingest(input_path: Path, index_dir: Path, embedding_model: str) -> None:
-    ext = input_path.suffix.lower()
-    if ext == ".csv":
-        records = read_csv(input_path)
-    elif ext in {".jsonl", ".ndjson"}:
-        records = read_jsonl(input_path)
-    else:
-        raise ValueError("Unsupported file type. Use .csv or .jsonl")
-
-    base_docs = build_docs(records)
-    if not base_docs:
-        print("No records to ingest.")
-        return
-
-    docs = chunk_docs(base_docs)
-    print(f"Built {len(base_docs)} base docs -> {len(docs)} chunks")
-
+def ingest_records(records: Iterable[Dict], index_dir: Path, embedding_model: str, batch_size: int = 128) -> None:
     ensure_dir(index_dir)
-
     metas_path = index_dir / "meta.json"
     index_path = index_dir / "index.faiss"
 
-    texts = [d["content"] for d in docs]
-    embs = _embed_texts(texts, embedding_model)
+    # Load or init index and meta
+    index = faiss.read_index(str(index_path)) if index_path.exists() else None
+    if index is None:
+        # initialize lazily when we know embedding dim
+        pass
+    meta = json.loads(metas_path.read_text(encoding="utf-8")) if metas_path.exists() else {"embedding_model": embedding_model, "chunks": []}
 
-    if index_path.exists() and metas_path.exists():
-        index = faiss.read_index(str(index_path))
+    buffer: List[Dict] = []
+    total_new = 0
+
+    def flush(buf: List[Dict]):
+        nonlocal index, meta, total_new
+        if not buf:
+            return
+        chunks = chunk_docs(buf)
+        texts = [d["content"] for d in chunks]
+        embs = _embed_texts(texts, embedding_model)
+        if index is None:
+            index = faiss.IndexFlatIP(embs.shape[1])
         index.add(embs)
-        meta = json.loads(metas_path.read_text(encoding="utf-8"))
-        meta["chunks"].extend(docs)
-    else:
-        index = faiss.IndexFlatIP(embs.shape[1])
-        index.add(embs)
-        meta = {"embedding_model": embedding_model, "chunks": docs}
+        meta["chunks"].extend(chunks)
+        total_new += len(chunks)
+
+    for r in records:
+        d = normalize_record(r)
+        if not d:
+            continue
+        buffer.append(d)
+        if len(buffer) >= batch_size:
+            flush(buffer)
+            buffer.clear()
+
+    flush(buffer)
+
+    if index is None:
+        print("No records to ingest.")
+        return
 
     faiss.write_index(index, str(index_path))
     metas_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-    print(f"Saved FAISS index at {index_dir} with {len(meta['chunks'])} total chunks")
+    print(f"Saved FAISS index at {index_dir} with {len(meta['chunks'])} total chunks (+{total_new} new)")
+
+
+def read_hf(hf_dataset: str, split: str) -> Iterator[Dict]:
+    from datasets import load_dataset  # lazy import
+
+    ds = load_dataset(hf_dataset, split=split)
+    for r in ds:
+        yield dict(r)
+
+
+def ingest(input_path: Optional[Path], index_dir: Path, embedding_model: str, hf_dataset: Optional[str] = None, split: str = "train") -> None:
+    if input_path:
+        ext = input_path.suffix.lower()
+        if ext == ".csv":
+            records = read_csv(input_path)
+        elif ext in {".jsonl", ".ndjson"}:
+            records = read_jsonl(input_path)
+        else:
+            raise ValueError("Unsupported file type. Use .csv or .jsonl")
+        ingest_records(records, index_dir, embedding_model)
+    elif hf_dataset:
+        records = read_hf(hf_dataset, split)
+        ingest_records(records, index_dir, embedding_model)
+    else:
+        raise ValueError("Provide a file path or --hf-dataset")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Ingest Q/A data into a FAISS vector store")
-    parser.add_argument("input", type=Path, help="Path to .csv or .jsonl with question/answer fields")
+    parser.add_argument("input", nargs="?", type=Path, help="Path to .csv or .jsonl with question/answer fields")
+    parser.add_argument("--hf-dataset", dest="hf_dataset", help="HuggingFace dataset id, e.g. toughdata/quora-question-answer-dataset")
+    parser.add_argument("--split", default="train", help="Dataset split when using --hf-dataset (default: train)")
     parser.add_argument(
         "--index-dir",
         type=Path,
@@ -153,7 +192,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     load_dotenv()
     args = parse_args()
-    ingest(args.input.resolve(), args.index_dir.resolve(), args.embedding_model)
+    input_path = args.input.resolve() if args.input else None
+    ingest(input_path, args.index_dir.resolve(), args.embedding_model, hf_dataset=args.hf_dataset, split=args.split)
 
 
 if __name__ == "__main__":
