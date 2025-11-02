@@ -1,5 +1,5 @@
 
-# 🧠 Quora-RAG: Context-Aware Q&A Assistant
+# Quora-RAG: Context-Aware Q&A Assistant
 
 **Quora-RAG** is a lightweight **Retrieval-Augmented Generation (RAG)** app that answers questions using real Quora-style Q&A data.  
 It retrieves relevant pairs from the [toughdata/quora-question-answer-dataset](https://huggingface.co/datasets/toughdata/quora-question-answer-dataset) and generates concise, grounded answers using an LLM.
