@@ -1,6 +1,10 @@
 
 # Quora-RAG: Context-Aware Q&A Assistant
 
+Live app: https://ms-codess-askquorarag-quora-ragapp-4euoh1.streamlit.app/
+
+![Quora-RAG App Screenshot](quora.png)
+
 **Quora-RAG** is a lightweight **Retrieval-Augmented Generation (RAG)** app that answers questions using real Quora-style Q&A data.  
 It retrieves relevant pairs from the [toughdata/quora-question-answer-dataset](https://huggingface.co/datasets/toughdata/quora-question-answer-dataset) and generates concise, grounded answers using an LLM.
 

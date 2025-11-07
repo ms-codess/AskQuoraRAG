@@ -75,6 +75,13 @@ with st.sidebar:
     )
     if not HAS_OPENAI:
         st.info("LLM disabled: 'openai' package not installed. Retrieval will still work.")
+    else:
+        if use_llm and OPENAI_API_KEY:
+            st.caption(f"LLM: ON • model={MODEL_NAME}")
+        elif not OPENAI_API_KEY:
+            st.caption("LLM: OFF • missing OPENAI_API_KEY")
+        else:
+            st.caption("LLM: OFF")
     if st.button("New chat", use_container_width=True):
         st.session_state.pop("messages", None)
 
@@ -163,6 +170,9 @@ Context:
 def process_query(question: str) -> None:
     if not question:
         return
+    # Show the user message immediately
+    with st.chat_message("user"):
+        st.write(question)
     st.session_state.messages.append({"role": "user", "content": question})
     with st.spinner("Retrieving context…"):
         hits = search(model, index, texts, question, k=top_k)
@@ -172,6 +182,9 @@ def process_query(question: str) -> None:
             answer = llm_answer(question, ctx_lines)
     else:
         answer = "LLM is off. Showing retrieved context only (open the expander)."
+    # Show assistant answer immediately
+    with st.chat_message("assistant"):
+        st.write(answer)
     st.session_state.messages.append({"role": "assistant", "content": answer, "ctx": hits})
 
 # Suggestions by specialization (top of page)
@@ -289,6 +302,14 @@ if show_suggestions:
             for i, q in enumerate(items):
                 if cols[i % 3].button(q, use_container_width=True, key=f"sugg_{cat}_{i}"):
                     process_query(q)
+else:
+    # Offer a quick way to clear chat and return to suggestions
+    if st.button("Back to suggestions", help="Clear chat and show topic suggestions again"):
+        st.session_state.messages = []
+        try:
+            st.rerun()
+        except Exception:
+            st.stop()
 
 # Chat area at the bottom
 st.markdown("---")
