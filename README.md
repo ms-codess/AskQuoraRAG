@@ -93,28 +93,4 @@ docker run -e OPENAI_API_KEY=sk-xxx -p 8501:8501 quora-rag
 3. Add your `OPENAI_API_KEY` in “Secrets”.
 4. Deploy.
 
----
-
-## 🧩 Environment Variables
-
-| Variable         | Description                | Default                                   |
-| ---------------- | -------------------------- | ----------------------------------------- |
-| `OPENAI_API_KEY` | API key for LLM | None                                      |
-| `MODEL_NAME`     | Model name for generation  | `gpt-4o-mini`                             |
-| `EMBED_MODEL`    | Embedding model            | `sentence-transformers/all-MiniLM-L6-v2`  |
-| `DATASET`        | HF dataset                 | `toughdata/quora-question-answer-dataset` |
-| `MAX_ROWS`       | Rows used for index        | `3000`                                    |
-
----
-
-##  Example Query
-
-**User:** “How can I start learning AI as a beginner?”
-**Retrieved Context:** 3 Quora-style answers from dataset
-**Generated Answer:**
-
-> Start with Python, learn the basics of ML, and experiment with small datasets.
-> [1] Focus on projects that combine code and data. [2] Apply what you learn quickly.
-
-
-
+-

@@ -1,25 +1,20 @@
-# syntax=docker/dockerfile:1
 FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+# System deps for faiss & sentence-transformers speed
+RUN apt-get update && apt-get install -y build-essential git && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app/quora-rag
+WORKDIR /app
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
 
-# System deps
-RUN apt-get update -y && apt-get install -y --no-install-recommends build-essential curl \
-    && rm -rf /var/lib/apt/lists/*
+# Cache-friendly: copy code after deps
+COPY . /app
 
-# Copy requirements first for better layering
-COPY requirements.txt ./
-RUN pip install -U pip && pip install -r requirements.txt
-
-# Copy app
-COPY . ./
+# Streamlit defaults
+ENV PYTHONUNBUFFERED=1 \
+    STREAMLIT_SERVER_HEADLESS=true \
+    STREAMLIT_SERVER_PORT=8501
 
 EXPOSE 8501
 
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
-
+CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0"]

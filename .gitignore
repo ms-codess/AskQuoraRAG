@@ -1,0 +1,19 @@
+# Global ignores to keep secrets and caches out of git
+.venv/
+**/__pycache__/
+**/*.pyc
+**/.DS_Store
+
+# Env and secrets
+**/.env
+**/.env.*
+**/.streamlit/secrets.toml
+
+# Build artifacts / indices
+**/faiss_index.bin
+**/texts.pkl
+**/data/
+
+# Jupyter and misc
+*.ipynb_checkpoints/
+*.log

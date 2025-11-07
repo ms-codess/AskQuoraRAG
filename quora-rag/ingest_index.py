@@ -120,6 +120,22 @@ def _embed_texts_hash(texts: List[str], dim: int = 1024) -> np.ndarray:
     return mat
 
 
+def _embed_texts_st(texts: List[str], model_name: str) -> np.ndarray:
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+    except Exception as e:
+        raise RuntimeError("sentence-transformers is not installed. Please install it in your environment.") from e
+    model = SentenceTransformer(model_name)
+    vecs = model.encode(
+        texts,
+        batch_size=max(8, min(64, len(texts))),
+        show_progress_bar=False,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+    )
+    return vecs.astype(np.float32)
+
+
 def ingest_records(
     records: Iterable[Dict],
     index_dir: Path,
@@ -128,6 +144,7 @@ def ingest_records(
     max_records: Optional[int] = None,
     embed_provider: str = "openai",
     hash_dim: int = 1024,
+    st_model: str = "sentence-transformers/all-MiniLM-L6-v2",
 ) -> None:
     ensure_dir(index_dir)
     metas_path = index_dir / "meta.json"
@@ -153,12 +170,24 @@ def ingest_records(
             embs = _embed_texts_hash(texts, dim=hash_dim)
             if meta.get("embedding_dim") is None:
                 meta["embedding_dim"] = hash_dim
+            meta["embedding_provider"] = "hash"
+        elif embed_provider == "st":
+            embs = _embed_texts_st(texts, model_name=st_model)
+            if meta.get("embedding_dim") is None:
+                meta["embedding_dim"] = int(embs.shape[1])
+            meta["embedding_provider"] = "st"
+            meta["st_model"] = st_model
         else:
             embs = _embed_texts_openai(texts, embedding_model)
             if meta.get("embedding_dim") is None:
                 meta["embedding_dim"] = int(embs.shape[1])
-        if index is None:
+            meta["embedding_provider"] = "openai"
+        if index is None or (hasattr(index, 'd') and index.d != embs.shape[1]):
+            # Initialize or reset index if dimension/provider changed
             index = faiss.IndexFlatIP(embs.shape[1])
+            if meta.get("embedding_dim") not in (None, embs.shape[1]):
+                print("Embedding dim changed; resetting index and metadata.")
+                meta = {"embedding_model": embedding_model, "embedding_provider": embed_provider, "embedding_dim": int(embs.shape[1]), "chunks": []}
         index.add(embs)
         meta["chunks"].extend(chunks)
         total_new += len(chunks)
@@ -208,6 +237,7 @@ def ingest(
     max_records: Optional[int] = None,
     embed_provider: str = "openai",
     hash_dim: int = 1024,
+    st_model: str = "sentence-transformers/all-MiniLM-L6-v2",
 ) -> None:
     if input_path:
         ext = input_path.suffix.lower()
@@ -217,10 +247,10 @@ def ingest(
             records = read_jsonl(input_path)
         else:
             raise ValueError("Unsupported file type. Use .csv or .jsonl")
-        ingest_records(records, index_dir, embedding_model, batch_size=batch_size, max_records=max_records, embed_provider=embed_provider, hash_dim=hash_dim)
+        ingest_records(records, index_dir, embedding_model, batch_size=batch_size, max_records=max_records, embed_provider=embed_provider, hash_dim=hash_dim, st_model=st_model)
     elif hf_dataset:
         records = read_hf(hf_dataset, split)
-        ingest_records(records, index_dir, embedding_model, batch_size=batch_size, max_records=max_records, embed_provider=embed_provider, hash_dim=hash_dim)
+        ingest_records(records, index_dir, embedding_model, batch_size=batch_size, max_records=max_records, embed_provider=embed_provider, hash_dim=hash_dim, st_model=st_model)
     else:
         raise ValueError("Provide a file path or --hf-dataset")
 
@@ -243,8 +273,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--batch-size", type=int, default=64, help="Embedding batch size (default: 64)")
     parser.add_argument("--max-records", type=int, default=None, help="Limit number of input records for ingestion")
-    parser.add_argument("--embed-provider", choices=["openai", "hash"], default=os.getenv("EMBED_PROVIDER", "openai"), help="Embedding provider: openai or hash (local)")
+    parser.add_argument("--embed-provider", choices=["openai", "hash", "st"], default=os.getenv("EMBED_PROVIDER", "openai"), help="Embedding provider: openai (API), st (sentence-transformers local), or hash (local)")
     parser.add_argument("--hash-dim", type=int, default=int(os.getenv("HASH_DIM", 1024)), help="Hash embedding dimension when using --embed-provider hash")
+    parser.add_argument("--st-model", default=os.getenv("ST_MODEL", "sentence-transformers/all-MiniLM-L6-v2"), help="Sentence-Transformers model id when using --embed-provider st")
     return parser.parse_args()
 
 
@@ -262,8 +293,18 @@ def main() -> None:
         max_records=args.max_records,
         embed_provider=args.embed_provider,
         hash_dim=args.hash_dim,
+        st_model=args.st_model,
     )
 
 
 if __name__ == "__main__":
     main()
+def _embed_texts_st(texts: List[str], model_name: str) -> np.ndarray:
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+    except Exception as e:
+        raise RuntimeError("sentence-transformers not installed. Please install requirements.") from e
+    model = SentenceTransformer(model_name)
+    vecs = model.encode(texts, batch_size=max(8, min(64, len(texts))), show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True)
+    vecs = vecs.astype(np.float32)
+    return vecs

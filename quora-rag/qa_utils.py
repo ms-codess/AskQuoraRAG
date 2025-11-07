@@ -1,133 +1,53 @@
-import os
-import json
-import hashlib
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, List, Optional
-
+import os, pickle
+import faiss
 import numpy as np
-from dotenv import load_dotenv
-import faiss  # type: ignore
-import requests
+from datasets import load_dataset
+from sentence_transformers import SentenceTransformer
 
+EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+INDEX_PATH = os.getenv("INDEX_PATH", "faiss_index.bin")
+TEXTS_PATH = os.getenv("TEXTS_PATH", "texts.pkl")
+DATASET = os.getenv("DATASET", "toughdata/quora-question-answer-dataset")
+MAX_ROWS = int(os.getenv("MAX_ROWS", "3000"))
 
-def _openai_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    load_dotenv()
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY not set in environment")
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    delay = 1.0
-    for _ in range(7):
-        resp = requests.post(url, headers=headers, json=payload, timeout=60)
-        if resp.status_code < 400:
-            return resp.json()
-        if resp.status_code in (429, 500, 502, 503, 504):
-            import time
-            time.sleep(delay)
-            delay = min(delay * 2, 30)
-            continue
-        resp.raise_for_status()
-    resp.raise_for_status()
-    return resp.json()
+def load_quora_pairs():
+    ds = load_dataset(DATASET, split="train")
+    rows = [{"q": r["question"], "a": r["answer"]} for r in ds]
+    return rows
 
+def build_corpus(rows, max_rows=3000):
+    rows = rows[:max_rows]
+    texts = [f"Q: {r['q']}\nA: {r['a']}" for r in rows]
+    return texts
 
-def _embed_texts_openai(texts: List[str], model: str) -> np.ndarray:
-    res = _openai_request("embeddings", {"model": model, "input": texts})
-    vectors = [np.array(item["embedding"], dtype=np.float32) for item in res["data"]]
-    arr = np.vstack(vectors)
-    faiss.normalize_L2(arr)
-    return arr
+def get_embedder():
+    return SentenceTransformer(EMBED_MODEL)
 
+def encode(texts, model):
+    embs = model.encode(texts, show_progress_bar=True, convert_to_numpy=True, normalize_embeddings=True)
+    return embs.astype("float32")
 
-def _embed_texts_hash(texts: List[str], dim: int) -> np.ndarray:
-    mat = np.zeros((len(texts), dim), dtype=np.float32)
-    for i, txt in enumerate(texts):
-        for tok in txt.lower().split():
-            h = int.from_bytes(hashlib.sha1(tok.encode("utf-8")).digest()[:8], "little")
-            j = h % dim
-            mat[i, j] += 1.0
-    faiss.normalize_L2(mat)
-    return mat
+def build_or_load_index():
+    if os.path.exists(INDEX_PATH) and os.path.exists(TEXTS_PATH):
+        with open(TEXTS_PATH, "rb") as f:
+            texts = pickle.load(f)
+        index = faiss.read_index(INDEX_PATH)
+        model = get_embedder()
+        return model, texts, index
 
+    rows = load_quora_pairs()
+    texts = build_corpus(rows, max_rows=MAX_ROWS)
+    model = get_embedder()
+    embs = encode(texts, model)
+    dim = embs.shape[1]
+    index = faiss.IndexFlatIP(dim)  # cosine (normalized vectors)
+    index.add(embs)
+    faiss.write_index(index, INDEX_PATH)
+    with open(TEXTS_PATH, "wb") as f:
+        pickle.dump(texts, f)
+    return model, texts, index
 
-@dataclass
-class SimpleFaissRetriever:
-    index: faiss.Index
-    chunks: List[Dict[str, Any]]
-    embedding_model: str
-    default_k: int = 4
-
-    def get_relevant_documents(self, query: str, k: Optional[int] = None) -> List[Dict[str, Any]]:
-        embs = _embed_texts([query], self.embedding_model)
-        D, I = self.index.search(embs, k or self.default_k)
-        hits = []
-        for idx in I[0]:
-            if idx == -1:
-                continue
-            hits.append(self.chunks[idx])
-        return hits
-
-
-def load_retriever(index_dir: str, k: int = 4, search_type: str = "similarity") -> SimpleFaissRetriever:
-    # search_type kept for back-compat; only similarity supported
-    index_path = Path(index_dir)
-    index = faiss.read_index(str(index_path / "index.faiss"))
-    meta = json.loads((index_path / "meta.json").read_text(encoding="utf-8"))
-    chunks = meta["chunks"]
-    embedding_model = meta.get("embedding_model", os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"))
-    # also record provider/dim on retriever instance by piggybacking metadata dict
-    retr = SimpleFaissRetriever(index=index, chunks=chunks, embedding_model=embedding_model, default_k=k)
-    retr._provider = meta.get("embedding_provider", "openai")  # type: ignore[attr-defined]
-    retr._dim = meta.get("embedding_dim", None)  # type: ignore[attr-defined]
-    return retr
-
-
-def _format_docs(docs: List[Dict[str, Any]]) -> str:
-    return "\n\n---\n\n".join(d.get("content", "") for d in docs)
-
-
-def answer_question(
-    question: str,
-    retriever: SimpleFaissRetriever,
-    model_name: Optional[str] = None,
-    temperature: float = 0.2,
-) -> Dict[str, Any]:
-    load_dotenv()
-    model = model_name or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-    # embed query consistently with index provider
-    provider = getattr(retriever, "_provider", "openai")
-    dim = getattr(retriever, "_dim", None)
-    if provider == "hash":
-        qv = _embed_texts_hash([question], int(dim or 1024))
-        D, I = retriever.index.search(qv, retriever.default_k)
-        docs = [retriever.chunks[i] for i in I[0] if i != -1]
-    else:
-        docs = retriever.get_relevant_documents(question)
-    context = _format_docs(docs)
-
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant answering based strictly on the provided context. If the answer is not in the context, say you don't know.",
-        },
-        {"role": "user", "content": f"Question: {question}\n\nContext:\n{context}"},
-    ]
-
-    res = _openai_request(
-        "chat/completions",
-        {"model": model, "messages": messages, "temperature": float(temperature)},
-    )
-    answer_text = res["choices"][0]["message"]["content"] or ""
-
-    sources: List[Dict[str, Any]] = []
-    for d in docs:
-        sources.append({"content": d.get("content", ""), "metadata": d.get("metadata", {})})
-
-    return {"answer": answer_text, "sources": sources}
+def search(model, index, texts, query, k=3):
+    q_emb = model.encode([query], convert_to_numpy=True, normalize_embeddings=True).astype("float32")
+    D, I = index.search(q_emb, k)
+    return [(texts[i], float(D[0][j])) for j, i in enumerate(I[0])]
