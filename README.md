@@ -97,4 +97,3 @@ docker run -e OPENAI_API_KEY=sk-xxx -p 8501:8501 quora-rag
 3. Add your `OPENAI_API_KEY` in “Secrets”.
 4. Deploy.
 
--
